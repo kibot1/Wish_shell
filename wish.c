@@ -5,13 +5,21 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <syscall.h>
 
 #define INTERACTIVE 1
 #define BATCH 2
 #define MAX_SIZE 64
+#define CHILD 0
+#define FAILED -1
 
-void cmd_exit();
+char *paths[MAX_SIZE];
+int path_count;
+
+void update_paths(char *cmd_args[], int arg_count);
 void print_error();
+
+
 
 int main(int argc, char *argv[]) {
     FILE *stream; //stream from where to get input from
@@ -26,7 +34,12 @@ int main(int argc, char *argv[]) {
             break;
 
         case BATCH: 
-            //stream = argv[1];
+            //open file and set as output stream
+            stream = fopen(argv[1], "r");
+            if (stream == NULL) {
+                print_error();
+                exit(1);
+            }
             break;
 
         default: //invalid number of arg's
@@ -34,16 +47,22 @@ int main(int argc, char *argv[]) {
             exit(1);
     }
 
-    char *paths[MAX_SIZE]; //array of paths
-    paths[0] = "/bin"; //set initial path
-    int path_count = 1;
+    //initialize paths array
+    extern char *paths[];
+    extern int path_count;
+    paths[0] = strdup("/bin");
+    path_count = 1;
+    
+
 
     while(true){ //loop prompt
-        printf("wish> ");
+        if(argc == INTERACTIVE){
+            printf("wish> ");
+        }
 
         //get line
         nread = getline(&line, &len, stream);
-        if(nread == -1){ //if EOF exit
+        if(nread == FAILED){ //if EOF, exit
             exit(0);
         }
         line[nread - 1] = '\0'; // remove '\n' from line
@@ -66,22 +85,22 @@ int main(int argc, char *argv[]) {
         // }
         // printf("\n");
 
-        //array to save child pid's
-        pid_t pids[MAX_SIZE];
-        int pid_count = 0;
+        pid_t pids[MAX_SIZE]; //array to save child pid's
+        int pid_count = 0; //keep count of pids
 
-        for(int i = 0; i < cmd_count; i++){ //loop thru each cmd to run
-            char *args[MAX_SIZE];
-            char *arg = strtok(cmds[i], " ");
-            int arg_count = 0;
+        // loop thru each cmd and parse it's arguments
+        for(int i = 0; i < cmd_count; i++){
+            char *cmd_args[MAX_SIZE]; //hold args
+            char *arg = strtok(cmds[i], " "); //first parse call to specify src
+            int arg_count = 0; //keep count of args
 
             //parse arguments in command
             while(arg != NULL){
-                args[arg_count] = arg;
+                cmd_args[arg_count] = arg;
                 arg_count++;
                 arg = strtok(NULL, " ");
             }
-            args[arg_count] = NULL; //null terminate the list
+            cmd_args[arg_count] = NULL; //null terminate the list so it works with execv()
 
             //debug test 2 - print command args
             // printf("arguments: \n");
@@ -90,49 +109,66 @@ int main(int argc, char *argv[]) {
             // }
 
             //check if command built-in or external
-            if(strcmp(args[0], "exit") == 0){
-                cmd_exit();
+            char *cmd = cmd_args[0];
+            if(strcmp(cmd, "exit") == 0){
+                if(arg_count > 1){ //should have zero arguments
+                    print_error();
+                    continue;
+                }
+
+                exit(0);
             }
-            else if(strcmp(args[0], "cd") == 0){
-                continue;
+            else if(strcmp(cmd, "cd") == 0){
+                if(arg_count != 2){ //should have one argument
+                    print_error();
+                    continue;
+                }
+
+                if(chdir(cmd_args[1]) == FAILED){
+                    print_error();
+                }
             }
-            else if(strcmp(args[0], "path") == 0){
-                continue;
+            else if(strcmp(cmd, "path") == 0){
+                update_paths(cmd_args, arg_count);
             }
             else{//external cmd
-                //check each path for executable
-                bool found = false;
+                bool found = false; //keep track of executable found
+
+                //check paths for executable
                 for(int j = 0; j < path_count; j++){
+
                     //combine cmd with path
                     char full_path[MAX_SIZE];
                     strcpy(full_path, paths[j]);
                     strcat(full_path, "/");
-                    strcat(full_path, args[0]);
+                    strcat(full_path, cmd);
 
                     //debug test 3 - print full path
                     //printf("full Path: %s\n", full_path);
 
                     if(access(full_path, X_OK) == 0){
                         found = true;
-                        //if executable run cmd
+                        //executable found run cmd
                         pid_t id = fork();
 
-                        if (id == 0){//child
-                            execv(full_path, args);
+                        if (id == CHILD){//child run cmd
+                            execv(full_path, cmd_args);
                             exit(1); //exit on fail
                         }
-                        else if (id > 0){
+                        else if (id > 0){ //parent keep running shell
                             pids[pid_count] = id;
                             pid_count++;
                             break;
                         }
                     }
                 }
+                //error if no executable found
                 if (found == false){
                     print_error();
                 }
             }
         }
+        //after running commands wait on all
         for(int i = 0; i < pid_count; i++){
             waitpid(pids[i], NULL, WUNTRACED);
         }
@@ -141,10 +177,25 @@ int main(int argc, char *argv[]) {
 
 }
 
-void cmd_exit(){
-    exit(0);
+//update paths array with new. replace old.
+void update_paths(char *cmd_args[], int arg_count){
+    extern char *paths[];
+    extern int path_count;
+
+    //free mem of old path
+    for(int i = 0; i < path_count; i++){
+        free(paths[i]);
+    }
+
+    //save new paths
+    path_count = 0;
+    for(int i = 1; i < arg_count; i++){
+        paths[path_count] = strdup(cmd_args[i]);
+        path_count++;
+    }
 }
 
+//prints error message.
 void print_error(){
     char error_message[30] = "An error has occurred\n";
     write(STDERR_FILENO, error_message, strlen(error_message));
