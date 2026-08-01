@@ -94,12 +94,42 @@ int main(int argc, char *argv[]) {
             char *arg = strtok(cmds[i], " "); //first parse call to specify src
             int arg_count = 0; //keep count of args
 
+            char *redirect_file = NULL;
+
             //parse arguments in command
-            while(arg != NULL){
+            while(arg != NULL && strchr(arg, '>') == NULL){
                 cmd_args[arg_count] = arg;
                 arg_count++;
                 arg = strtok(NULL, " ");
             }
+
+            if(arg != NULL && strchr(arg, '>') != NULL){//found redirection symbol
+                /*
+                possible cases:
+                1. '>' separated by space(s) from arguments
+                2. '>' arg attached at start output separated
+                3. '>' output attacked end arg separated
+                4. '>' arg attached at start and output attacked at end
+                */
+
+                //check for possible case 1 or 2
+                redirect_file = strtok(NULL, " ");
+                if(redirect_file != NULL){ //must be case 1 or 2, output not attacked unless error present
+                    char *temp = strtok(NULL, " ");
+                    if(temp != NULL){//error, should only be max one arg after '>'
+                        print_error();
+                        continue;
+                    }
+                    else{//check arg attached at start
+                        int temp = strtok(arg, ">")
+                        if(temp != NULL){//case 2
+                            
+                        }
+                    }
+                }
+
+            }
+
             cmd_args[arg_count] = NULL; //null terminate the list so it works with execv()
 
             //debug test 2 - print command args
@@ -131,7 +161,7 @@ int main(int argc, char *argv[]) {
             else if(strcmp(cmd, "path") == 0){
                 update_paths(cmd_args, arg_count);
             }
-            else{//external cmd
+            else{//external command
                 bool found = false; //keep track of executable found
 
                 //check paths for executable
@@ -152,6 +182,16 @@ int main(int argc, char *argv[]) {
                         pid_t id = fork();
 
                         if (id == CHILD){//child run cmd
+
+                            //check for redirect
+                            if(redirect_file != NULL){//redirect
+                                FILE *output = freopen(redirect_file, "w", stdout); 
+                                if(output == NULL){//error opening file
+                                    print_error();
+                                    exit(1);
+                                }
+                                dup2(STDOUT_FILENO, STDERR_FILENO);
+                            }
                             execv(full_path, cmd_args);
                             exit(1); //exit on fail
                         }
