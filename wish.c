@@ -8,15 +8,16 @@
 #include <syscall.h>
 
 #define INTERACTIVE 1
+#define BASE_SIZE 64
 #define BATCH 2
-#define MAX_SIZE 64
 #define CHILD 0
 #define FAILED -1
 
-char *paths[MAX_SIZE];
-int path_count;
-
-void update_paths(char *cmd_args[], int arg_count);
+int parse_commands(char *line, char ***cmds_out);
+int parse_args(char *cmd_line, char ***args_out, char *output_name);
+void pre_process(char **buffer, char *cmd);
+void update_paths(char *paths[], int path_count, char *arr[], int arg_count);
+int add_token(char ***dst,int dst_index, int dst_size, char *token);
 void print_error();
 
 
@@ -48,10 +49,9 @@ int main(int argc, char *argv[]) {
     }
 
     //initialize paths array
-    extern char *paths[];
-    extern int path_count;
-    paths[0] = strdup("/bin");
-    path_count = 1;
+    char *paths[BASE_SIZE];
+    paths[0] = "/bin";
+    int path_count = 1;
     
 
 
@@ -67,76 +67,31 @@ int main(int argc, char *argv[]) {
         }
         line[nread - 1] = '\0'; // remove '\n' from line
 
-        char *cmds[MAX_SIZE]; //store commands from line
-        char *cmd = strtok(line, "&"); //first call to specify src
-        int cmd_count = 0; //keep count of commands
-
-        //parse commands (delim with "&")
-        while(cmd != NULL){
-            cmds[cmd_count] = cmd;
-            cmd_count++;
-            cmd = strtok(NULL, "&");
+        //parse commands from 'line'
+        char **cmds;
+        int cmd_count = parse_commands(line, &cmds);
+        if(cmd_count == -1){//error parsing
+            print_error();
+            continue;
         }
 
-        //debug test 1 - print commands
-        // printf("commands: \n");
-        // for(int i = 0; i < cmd_count; i++){
-        //     printf("- %s\n", cmds[i]);
-        // }
-        // printf("\n");
-
-        pid_t pids[MAX_SIZE]; //array to save child pid's
+        pid_t pids[cmd_count]; //array to save child pid's
         int pid_count = 0; //keep count of pids
 
         // loop thru each cmd and parse it's arguments
         for(int i = 0; i < cmd_count; i++){
-            char *cmd_args[MAX_SIZE]; //hold args
-            char *arg = strtok(cmds[i], " "); //first parse call to specify src
-            int arg_count = 0; //keep count of args
-
-            char *redirect_file = NULL;
-
-            //parse arguments in command
-            while(arg != NULL && strchr(arg, '>') == NULL){
-                cmd_args[arg_count] = arg;
-                arg_count++;
-                arg = strtok(NULL, " ");
+            /*preprocessing pass adding blank space between any ">"
+            simplifies redirection handling */
+            char *buffer = malloc(strlen(cmds[i]) * 3);//max possible size needed
+            if(buffer == NULL){//error, failed allocation
+                print_error();
+                continue;
             }
+            pre_process(&buffer, cmds[i]);
 
-            if(arg != NULL && strchr(arg, '>') != NULL){//found redirection symbol
-                /*
-                possible cases:
-                1. '>' separated by space(s) from arguments
-                2. '>' arg attached at start output separated
-                3. '>' output attacked end arg separated
-                4. '>' arg attached at start and output attacked at end
-                */
-
-                //check for possible case 1 or 2
-                redirect_file = strtok(NULL, " ");
-                if(redirect_file != NULL){ //must be case 1 or 2, output not attacked unless error present
-                    char *temp = strtok(NULL, " ");
-                    if(temp != NULL){//error, should only be max one arg after '>'
-                        print_error();
-                        continue;
-                    }
-                    else{//check arg attached at start
-                        int temp = strtok(arg, ">")
-                        if(temp != NULL){//case 2
-                            
-                        }
-                    }
-                }
-
-            }
-
-            cmd_args[arg_count] = NULL; //null terminate the list so it works with execv()
-
-            //debug test 2 - print command args
-            // printf("arguments: \n");
-            // for(int j = 0; j < arg_count; j++){
-            //     printf("- %s\n", args[j]);
-            // }
+            char *cmd_args;
+            char *output_name = NULL;
+            int arg_count = parse_args(buffer, &cmd_args, &output_name);
 
             //check if command built-in or external
             char *cmd = cmd_args[0];
@@ -156,10 +111,11 @@ int main(int argc, char *argv[]) {
 
                 if(chdir(cmd_args[1]) == FAILED){
                     print_error();
+                    continue;
                 }
             }
             else if(strcmp(cmd, "path") == 0){
-                update_paths(cmd_args, arg_count);
+                update_paths(paths, path_count, cmd_args, arg_count);
             }
             else{//external command
                 bool found = false; //keep track of executable found
@@ -168,7 +124,7 @@ int main(int argc, char *argv[]) {
                 for(int j = 0; j < path_count; j++){
 
                     //combine cmd with path
-                    char full_path[MAX_SIZE];
+                    char full_path[strlen(paths[j]) + 1 + strlen(cmd) + 1]; 
                     strcpy(full_path, paths[j]);
                     strcat(full_path, "/");
                     strcat(full_path, cmd);
@@ -184,8 +140,8 @@ int main(int argc, char *argv[]) {
                         if (id == CHILD){//child run cmd
 
                             //check for redirect
-                            if(redirect_file != NULL){//redirect
-                                FILE *output = freopen(redirect_file, "w", stdout); 
+                            if(output_name != NULL){//redirect
+                                FILE *output = freopen(output_name, "w", stdout); 
                                 if(output == NULL){//error opening file
                                     print_error();
                                     exit(1);
@@ -214,15 +170,73 @@ int main(int argc, char *argv[]) {
         }
 
     }
+}
 
+/*helper function for parsing line of commands
+success: return command count
+error: return -1
+*/
+int parse_commands(char *line, char ***cmds_out){
+    int size = BASE_SIZE;
+    *cmds_out = malloc(size * sizeof(char*));
+    int cmd_count = 0;
+    char *cmd = strtok(line, "&");
+
+    while(cmd != NULL){
+        if(cmd_count == size){
+            size*=2;
+            char **temp = realloc(*cmds_out, size * sizeof(char*));
+            if(temp == NULL){//failed realloc
+                //free up memory
+                free(*cmds_out);
+                return -1;
+            }
+            //successful realloc
+            *cmds_out = temp;
+        }
+
+        (*cmds_out)[cmd_count] = cmd;
+        cmd_count++;
+        cmd = strtok(NULL, "&");
+    }
+
+    //success parsing, return cmd count
+    return cmd_count;
+}
+
+/*helper function
+adds whitespace between redirect symbol to make 
+command argument processing easier*/
+void pre_process(char **buffer, char *cmd){
+    int index = 0; //index for buffer
+    for(int i = 0; i < strlen(cmd); i++){
+        if(cmd[i] == '>'){
+            (*buffer)[index] = ' ';
+            index++;
+            (*buffer)[index] = '>';
+            index++;
+            (*buffer)[index] = ' ';
+        }
+        else{
+            (*buffer)[index] = cmd[i];
+        }
+
+        index++;
+    }
+}
+
+int parse_args(char *cmd_line, char ***args_out, char **output_name){
+    int size = BASE_SIZE;
+    *args_out = malloc(size * sizeof(char*));
+    int arg_count = 0;
+    char *arg = strtok(cmd_line, " ");
+
+    return arg_count;
 }
 
 //update paths array with new. replace old.
-void update_paths(char *cmd_args[], int arg_count){
-    extern char *paths[];
-    extern int path_count;
-
-    //free mem of old path
+void update_paths(char *paths[], int path_count, char *arr[], int arg_count){
+    //free memory
     for(int i = 0; i < path_count; i++){
         free(paths[i]);
     }
@@ -230,7 +244,8 @@ void update_paths(char *cmd_args[], int arg_count){
     //save new paths
     path_count = 0;
     for(int i = 1; i < arg_count; i++){
-        paths[path_count] = strdup(cmd_args[i]);
+        paths[path_count] = strdup(arr[i]);
+        printf("%s", paths[i]);
         path_count++;
     }
 }
