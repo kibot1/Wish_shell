@@ -14,10 +14,11 @@
 #define FAILED -1
 
 int parse_commands(char *line, char ***cmds_out);
-int parse_args(char *cmd_line, char ***args_out, char *output_name);
-void pre_process(char **buffer, char *cmd);
-void update_paths(char *paths[], int path_count, char *arr[], int arg_count);
-int add_token(char ***dst,int dst_index, int dst_size, char *token);
+int parse_args(char *cmd_line, char ***args_out, char **output_name);
+void pre_process(char *buffer, char *cmd);
+void find_path(char **full_path, char *paths[], int path_count, char *cmd);
+void run_cmd(char *output_name, char *full_path, char *cmd_args[]);
+//int update_paths(char **paths[], int path_count, char *arr[], int arg_count);
 void print_error();
 
 
@@ -50,7 +51,7 @@ int main(int argc, char *argv[]) {
 
     //initialize paths array
     char *paths[BASE_SIZE];
-    paths[0] = "/bin";
+    paths[0] = strdup("/bin");
     int path_count = 1;
     
 
@@ -80,18 +81,19 @@ int main(int argc, char *argv[]) {
 
         // loop thru each cmd and parse it's arguments
         for(int i = 0; i < cmd_count; i++){
-            /*preprocessing pass adding blank space between any ">"
-            simplifies redirection handling */
-            char *buffer = malloc(strlen(cmds[i]) * 3);//max possible size needed
-            if(buffer == NULL){//error, failed allocation
+
+            char buffer[strlen(cmds[i]) * 3 + 1];
+            //adds whitespace between any '>'
+            //helps in parsing args
+            pre_process(buffer, cmds[i]);
+
+            char **cmd_args;//hold cmd's arguments
+            char *output_name = NULL;//save redirect file name if any
+            int arg_count = parse_args(buffer, &cmd_args, &output_name);
+            if(arg_count == -1){
                 print_error();
                 continue;
             }
-            pre_process(&buffer, cmds[i]);
-
-            char *cmd_args;
-            char *output_name = NULL;
-            int arg_count = parse_args(buffer, &cmd_args, &output_name);
 
             //check if command built-in or external
             char *cmd = cmd_args[0];
@@ -115,53 +117,31 @@ int main(int argc, char *argv[]) {
                 }
             }
             else if(strcmp(cmd, "path") == 0){
-                update_paths(paths, path_count, cmd_args, arg_count);
+                //update_paths(paths, path_count, cmd_args, arg_count);
+                continue;
             }
             else{//external command
-                bool found = false; //keep track of executable found
-
-                //check paths for executable
-                for(int j = 0; j < path_count; j++){
-
-                    //combine cmd with path
-                    char full_path[strlen(paths[j]) + 1 + strlen(cmd) + 1]; 
-                    strcpy(full_path, paths[j]);
-                    strcat(full_path, "/");
-                    strcat(full_path, cmd);
-
-                    //debug test 3 - print full path
-                    //printf("full Path: %s\n", full_path);
-
-                    if(access(full_path, X_OK) == 0){
-                        found = true;
-                        //executable found run cmd
-                        pid_t id = fork();
-
-                        if (id == CHILD){//child run cmd
-
-                            //check for redirect
-                            if(output_name != NULL){//redirect
-                                FILE *output = freopen(output_name, "w", stdout); 
-                                if(output == NULL){//error opening file
-                                    print_error();
-                                    exit(1);
-                                }
-                                dup2(STDOUT_FILENO, STDERR_FILENO);
-                            }
-                            execv(full_path, cmd_args);
-                            exit(1); //exit on fail
-                        }
-                        else if (id > 0){ //parent keep running shell
-                            pids[pid_count] = id;
-                            pid_count++;
-                            break;
-                        }
-                    }
-                }
-                //error if no executable found
-                if (found == false){
+                char *full_path = NULL;
+                find_path(&full_path, paths, path_count, cmd);
+                if(full_path == NULL){
                     print_error();
+                    continue;
                 }
+                        
+                //executable found run cmd
+                pid_t id = fork();
+
+                if (id < 0){//error
+                    free(full_path);
+                }
+                if (id == CHILD){//child run cmd
+                    run_cmd(output_name, full_path, cmd_args);
+                }
+                else if (id > 0){ //parent keep running shell
+                    pids[pid_count] = id;
+                    pid_count++;
+                    free(full_path);
+                }  
             }
         }
         //after running commands wait on all
@@ -177,13 +157,13 @@ success: return command count
 error: return -1
 */
 int parse_commands(char *line, char ***cmds_out){
-    int size = BASE_SIZE;
+    int size = BASE_SIZE; //initial size
     *cmds_out = malloc(size * sizeof(char*));
     int cmd_count = 0;
     char *cmd = strtok(line, "&");
 
     while(cmd != NULL){
-        if(cmd_count == size){
+        if(cmd_count == size){//if size limit reached, grow array
             size*=2;
             char **temp = realloc(*cmds_out, size * sizeof(char*));
             if(temp == NULL){//failed realloc
@@ -205,49 +185,112 @@ int parse_commands(char *line, char ***cmds_out){
 }
 
 /*helper function
-adds whitespace between redirect symbol to make 
+-adds whitespace between redirect('>') symbol to make 
 command argument processing easier*/
-void pre_process(char **buffer, char *cmd){
+void pre_process(char *buffer, char *cmd){
     int index = 0; //index for buffer
     for(int i = 0; i < strlen(cmd); i++){
         if(cmd[i] == '>'){
-            (*buffer)[index] = ' ';
+            //add space around '>'
+            buffer[index] = ' ';
             index++;
-            (*buffer)[index] = '>';
+            buffer[index] = '>';
             index++;
-            (*buffer)[index] = ' ';
+            buffer[index] = ' ';
         }
         else{
-            (*buffer)[index] = cmd[i];
+            //if not '>' just copy over the character
+            buffer[index] = cmd[i];
         }
 
         index++;
     }
+
+    buffer[index] = '\0';
 }
 
+/*helper function
+-parses cmd_line and returns array with arguments
+-if found redirection saves output name
+success: return arg_count
+fail: returns -1*/
 int parse_args(char *cmd_line, char ***args_out, char **output_name){
     int size = BASE_SIZE;
     *args_out = malloc(size * sizeof(char*));
     int arg_count = 0;
     char *arg = strtok(cmd_line, " ");
 
+    while(arg != NULL && strcmp(arg, ">") != 0){
+        //check if size of args_out reached
+        //account for null termination needed at end
+        if(arg_count == size - 1){
+            size*=2;
+            char **temp = realloc(*args_out, size * sizeof(char*));
+            if(temp == NULL){
+                free(*args_out);
+                return -1;
+
+            }
+            //successful realloc
+            *args_out = temp;
+
+        }
+        (*args_out)[arg_count] = arg;
+        arg_count++;
+        arg = strtok(NULL, " ");
+    }
+
+    if(arg != NULL && strcmp(arg, ">") == 0){
+        arg = strtok(NULL, " ");
+        if(arg == NULL){
+            free(*args_out);
+            return -1;
+        }
+        *output_name = arg;
+        if(strtok(NULL, " ") != NULL){
+            free(*args_out);
+            return -1;
+        }
+    }
+    (*args_out)[arg_count] = NULL;
     return arg_count;
 }
 
-//update paths array with new. replace old.
-void update_paths(char *paths[], int path_count, char *arr[], int arg_count){
-    //free memory
+/*helper function
+-looks for executable in each path in paths[]
+success: returns executable
+fail: returns NULL*/
+void find_path(char **full_path, char *paths[], int path_count, char *cmd){
+    //check paths for executable
     for(int i = 0; i < path_count; i++){
-        free(paths[i]);
-    }
+        //combine cmd with path
+        char *temp = malloc(strlen(paths[i]) + 1 + strlen(cmd) + 1);
+        strcpy(temp, paths[i]);
+        strcat(temp, "/");
+        strcat(temp, cmd);
 
-    //save new paths
-    path_count = 0;
-    for(int i = 1; i < arg_count; i++){
-        paths[path_count] = strdup(arr[i]);
-        printf("%s", paths[i]);
-        path_count++;
+        if(access(temp, X_OK) == 0){
+            *full_path = temp;
+            return;
+        }
+        else{
+            free(temp);
+        }
     }
+}
+
+void run_cmd(char *output_name, char *full_path, char *cmd_args[]){
+    //check for redirect
+    if(output_name != NULL){//redirect
+        FILE *output = freopen(output_name, "w", stdout); 
+        if(output == NULL){//error opening file
+            print_error();
+            exit(1);
+        }
+        dup2(STDOUT_FILENO, STDERR_FILENO);
+    }
+    execv(full_path, cmd_args);
+    exit(1); //exit on fail
 }
 
 //prints error message.
